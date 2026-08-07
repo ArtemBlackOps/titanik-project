@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+
+# Data and models (do not push to git)
+data/
+*.csv
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.h5
+*.pth
+
+# Jupyter Checkpoints
+.ipynb_checkpoints/
