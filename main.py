@@ -184,7 +184,7 @@ class MLPipeline:
 
             # Вывод итога по модели
             oof_results[f"{model_name}_oof"] = oof_preds
-            score = mean_squared_error(Y, oof_preds, squared=False) if self.config.task == "regression" else roc_auc_score(Y, oof_preds)
+            score = np.sqrt(mean_squared_error(Y, oof_preds)) if self.config.task == "regression" else roc_auc_score(Y, oof_preds)
             print(f"--> Total OOF Metric ({self.config.task}): {round(score, 4)}")
 
             fi_df = pl.DataFrame({"feature": X_tr.columns.tolist(), "importance": feature_importances}).sort(by='importance', descending=True)
