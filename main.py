@@ -40,7 +40,7 @@ LOGISTIC_PARAMS = {
 class Config:
     def __init__(
         self,
-        task: str = "regression",             # "regression" или "classification"
+        task: str = "classification",             # "regression" или "classification"
         n_splits: int = 5,
         linear_params: dict = None,
         logistic_params: dict = None,
