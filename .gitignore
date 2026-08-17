@@ -231,3 +231,5 @@ data/
 
 # Jupyter Checkpoints
 .ipynb_checkpoints/
+
+catboost_info/
