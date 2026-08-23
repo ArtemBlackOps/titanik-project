@@ -83,12 +83,12 @@ class PipelineConfig:
     random_state: int = 42
     metric: str = "auto"
     run_mode: str = "train_only"
+    score_name: str = "Score_v1"  # <-- Новое поле для имени столбца со скором
     tuning_config: TuningConfig = field(default_factory=TuningConfig)
     active_models: List[str] = field(default_factory=lambda: ["lgb", "xgb"])
     models_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self):
-        # 1. Автоматический дефолт, если метрика = "auto"
         if self.metric == "auto":
             if self.task == "binary":
                 self.metric = "roc_auc"
@@ -97,7 +97,6 @@ class PipelineConfig:
             elif self.task == "regression":
                 self.metric = "rmse"
 
-        # 2. Валидация выбранной метрики под задачу
         if self.task not in SUPPORTED_METRICS:
             raise ValueError(f"Неподдерживаемая задача '{self.task}'. Выберите из {list(SUPPORTED_METRICS.keys())}")
 
@@ -323,7 +322,7 @@ class MLPipeline:
         self.oof_predictions: Dict[str, Any] = {}
         self.best_params: Dict[str, Dict[str, Any]] = {}
 
-    def fit(self, X: pd.DataFrame, y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
+    def fit(self, X: pd.DataFrame, y: Union[pd.Series, np.ndarray]) -> pd.DataFrame:
         if isinstance(X, pd.DataFrame):
             num_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
             cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -341,7 +340,7 @@ class MLPipeline:
             else:
                 self.best_params[model_name] = self.config.models_params.get(model_name, {})
 
-        metrics_summary = {}
+        results = []
 
         for model_name in self.config.active_models:
             print(f"\n=================== Training: {model_name} ===================")
@@ -353,7 +352,11 @@ class MLPipeline:
                 model = ModelFactory.get_model(model_name, self.config.task, params, self.config.random_state)
                 model.fit(X_proc, y_vec)
                 self.fitted_models[model_name].append(model)
-                metrics_summary[model_name] = None
+                
+                # Замеряем метрику на train, если нет валидации
+                preds = get_model_predictions(model, X_proc, self.config.metric, self.config.task)
+                score = calculate_metric(y_vec, preds, self.config.metric, self.config.task)
+                score_val = round(score * 100, 2) if self.config.metric in ["accuracy", "roc_auc", "f1"] else round(score, 4)
 
             elif self.config.val_strategy == "holdout":
                 X_tr, X_val, y_tr, y_val = train_test_split(
@@ -369,7 +372,7 @@ class MLPipeline:
                 print(f"--> Holdout {self.config.metric.upper()}: {score:.4f}")
 
                 self.fitted_models[model_name].append(model)
-                metrics_summary[model_name] = score
+                score_val = round(score * 100, 2) if self.config.metric in ["accuracy", "roc_auc", "f1"] else round(score, 4)
 
             else:
                 if self.config.val_strategy == "stratified" and self.config.task in ["binary", "multiclass"]:
@@ -377,7 +380,6 @@ class MLPipeline:
                 else:
                     cv = KFold(n_splits=self.config.n_splits, shuffle=True, random_state=self.config.random_state)
 
-                # Выделение массива нужной формы для OOF
                 if self.config.task == "multiclass" and self.config.metric == "log_loss":
                     n_classes = len(np.unique(y_vec))
                     oof = np.zeros((len(X_proc), n_classes))
@@ -398,9 +400,20 @@ class MLPipeline:
                 self.oof_predictions[model_name] = oof
                 total_score = calculate_metric(y_vec, oof, self.config.metric, self.config.task)
                 print(f"--> Total OOF {self.config.metric.upper()}: {total_score:.4f}")
-                metrics_summary[model_name] = total_score
+                score_val = round(total_score * 100, 2) if self.config.metric in ["accuracy", "roc_auc", "f1"] else round(total_score, 4)
 
-        return metrics_summary
+            results.append({
+                'Model': model_name,
+                self.config.score_name: score_val
+            })
+
+        # Формируем и сортируем итоговый DataFrame
+        is_maximize = SUPPORTED_METRICS[self.config.task][self.config.metric]
+        summary_df = pd.DataFrame(results).sort_values(
+            by=self.config.score_name, ascending=not is_maximize
+        ).reset_index(drop=True)
+
+        return summary_df
 
     def predict(self, X_test: pd.DataFrame) -> pd.DataFrame:
         if self.preprocessor is not None and isinstance(X_test, pd.DataFrame):
