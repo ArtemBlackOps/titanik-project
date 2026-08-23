@@ -5,7 +5,18 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+import random
+import os
 
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # --- Map функций активации и оптимизаторов ---
 ACTIVATION_MAP = {
@@ -175,7 +186,10 @@ class DLTrainer:
 
     def fit(self, X_train_num: np.ndarray, y_train: np.ndarray, 
             X_val_num: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None,
-            X_train_cat: Optional[np.ndarray] = None, X_val_cat: Optional[np.ndarray] = None) -> Dict[str, List[float]]:
+            X_train_cat: Optional[np.ndarray] = None, X_val_cat: Optional[np.ndarray] = None,
+            seed: int = 42) -> Dict[str, List[float]]:
+
+        seed_everything(seed)
         
         # Подготовка данных
         train_dataset = TabularDataset(X_train_num, X_train_cat, y_train)

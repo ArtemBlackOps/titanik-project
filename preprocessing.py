@@ -54,8 +54,10 @@ def process_and_align_datasets(train_df, test_df):
     
     bool_cols_te = X_te_encoded.select_dtypes(include='bool').columns
     X_te_encoded[bool_cols_te] = X_te_encoded[bool_cols_te].astype(int)
+
+    Y_train = train_df["Survived"]
     
-    return X_tr_encoded, X_te_encoded
+    return X_tr_encoded, Y_train, X_te_encoded
 
 def process_and_align_datasets_v2(train, test):
     # 1. Расчет медианы возраста строго по Train
@@ -169,8 +171,56 @@ def process_and_align_datasets_v3(train_df: pd.DataFrame, test_df: pd.DataFrame)
     scaler = StandardScaler()
     X_tr_encoded['Age_scaled'] = scaler.fit_transform(X_tr[['Age']])
     X_te_encoded['Age_scaled'] = scaler.transform(X_te[['Age']])
+
+    Y_train = train_df['Survived']
+
+
     
-    return X_tr_encoded, X_te_encoded
+    return X_tr_encoded, Y_train, X_te_encoded
+
+def process_and_align_datasets_v4(train_df, test_df):
+    # Копируем датасеты, чтобы не менять исходные
+    df_train = train_df.copy()
+    df_test = test_df.copy()
+    
+    # 1. Заполнение Fare в test медианой из train (без утечки данных)
+    fare_median = df_train['Fare'].median()
+    df_train['Fare'] = df_train['Fare'].fillna(fare_median)
+    df_test['Fare'] = df_test['Fare'].fillna(fare_median)
+    
+    # 2. Заполнение Age медианой по группам (Sex, Pclass) из train
+    age_medians = df_train.groupby(['Sex', 'Pclass'])['Age'].median()
+    
+    def fill_age(df):
+        return df.apply(
+            lambda row: age_medians.loc[(row['Sex'], row['Pclass'])] if pd.isna(row['Age']) else row['Age'], 
+            axis=1
+        ).astype(int)
+        
+    df_train['Age'] = fill_age(df_train)
+    df_test['Age'] = fill_age(df_test)
+    
+    # 3. Маппинг категорий (Sex и Embarked)
+    sex_map = {'male': 0, 'female': 1}
+    embarked_map = {'S': 0, 'C': 1, 'Q': 2}
+    
+    for df in [df_train, df_test]:
+        df['Sex'] = df['Sex'].map(sex_map)
+        df['Embarked'] = df['Embarked'].fillna('S').map(embarked_map)
+        
+        # 4. Признаки семьи
+        df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
+        df['IsAlone'] = (df['FamilySize'] == 1).astype(int)
+        
+    # Выделяем нужные колонки признаков
+    feature_cols = ['Pclass', 'Sex', 'Age', 'SibSp', 'Parch', 'Fare', 'Embarked', 'FamilySize', 'IsAlone']
+    
+    X_train = df_train[feature_cols]
+    Y_train = df_train['Survived']
+    X_test = df_test[feature_cols]
+    
+    return X_train, Y_train, X_test
+
 
 def evaluate_baseline_models(X_train, Y_train, X_test, score_name: str = 'Score'):
     # 1. Задаем словарь всех проверяемых моделей
