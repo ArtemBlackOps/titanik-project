@@ -1,12 +1,20 @@
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Union, Tuple, Any
+import os
+import random
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import random
-import os
+from torch.utils.data import DataLoader, Dataset
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import StratifiedKFold
+
+
 
 def seed_everything(seed=42):
     random.seed(seed)
@@ -69,6 +77,10 @@ class DLConfig:
     # Scheduler
     use_scheduler: bool = True
     scheduler_type: str = 'cosine'  # 'cosine' или 'step'
+
+    # Early Stopping
+    early_stopping: bool = True
+    patience: int = 20  # Сколько эпох ждем без улучшений val_loss
     
     # Задача и Loss
     task: str = 'binary'  # 'binary', 'multiclass', 'regression'
@@ -170,6 +182,7 @@ class FlexibleMLP(nn.Module):
 
 class DLTrainer:
     """Класс для управления обучением, валидацией и инференсом."""
+
     def __init__(self, config: DLConfig):
         self.config = config
         self.device = torch.device(config.device)
@@ -184,39 +197,62 @@ class DLTrainer:
         else:
             return nn.MSELoss()
 
-    def fit(self, X_train_num: np.ndarray, y_train: np.ndarray, 
-            X_val_num: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None,
-            X_train_cat: Optional[np.ndarray] = None, X_val_cat: Optional[np.ndarray] = None,
-            seed: int = 42) -> Dict[str, List[float]]:
+    def fit(
+        self,
+        X_train_num: np.ndarray,
+        y_train: np.ndarray,
+        X_val_num: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None,
+        X_train_cat: Optional[np.ndarray] = None,
+        X_val_cat: Optional[np.ndarray] = None,
+        seed: int = 42,
+    ) -> Dict[str, List[float]]:
 
         seed_everything(seed)
-        
+
         # Подготовка данных
         train_dataset = TabularDataset(X_train_num, X_train_cat, y_train)
-        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
-        
+        train_loader = DataLoader(
+            train_dataset, batch_size=self.config.batch_size, shuffle=True
+        )
+
         val_loader = None
         if X_val_num is not None and y_val is not None:
             val_dataset = TabularDataset(X_val_num, X_val_cat, y_val)
-            val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
+            val_loader = DataLoader(
+                val_dataset, batch_size=self.config.batch_size, shuffle=False
+            )
 
         # Инициализация модели
         in_features = X_train_num.shape[1]
         self.model = FlexibleMLP(in_features, self.config).to(self.device)
 
-        # Инициализация оптимизатора
-        opt_cls = OPTIMIZER_MAP.get(self.config.optimizer_name.lower(), torch.optim.AdamW)
-        optimizer = opt_cls(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
+        opt_cls = OPTIMIZER_MAP.get(
+            self.config.optimizer_name.lower(), torch.optim.AdamW
+        )
+        optimizer = opt_cls(
+            self.model.parameters(),
+            lr=self.config.lr,
+            weight_decay=self.config.weight_decay,
+        )
 
-        # Инициализация планировщика LR
         scheduler = None
         if self.config.use_scheduler:
             if self.config.scheduler_type == 'cosine':
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=self.config.epochs
+                )
             elif self.config.scheduler_type == 'step':
-                scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+                scheduler = torch.optim.lr_scheduler.StepLR(
+                    optimizer, step_size=5, gamma=0.5
+                )
 
         history = {'train_loss': [], 'val_loss': []}
+
+        # --- Переменные для Early Stopping ---
+        best_val_loss = float('inf')
+        best_model_weights = None
+        patience_counter = 0
 
         for epoch in range(1, self.config.epochs + 1):
             # --- Training ---
@@ -224,7 +260,9 @@ class DLTrainer:
             running_loss = 0.0
             for batch in train_loader:
                 x_num = batch['num'].to(self.device)
-                x_cat = batch['cat'].to(self.device) if 'cat' in batch else None
+                x_cat = (
+                    batch['cat'].to(self.device) if 'cat' in batch else None
+                )
                 y = batch['y'].to(self.device)
 
                 if self.config.task == 'binary':
@@ -256,7 +294,11 @@ class DLTrainer:
                 with torch.no_grad():
                     for batch in val_loader:
                         x_num = batch['num'].to(self.device)
-                        x_cat = batch['cat'].to(self.device) if 'cat' in batch else None
+                        x_cat = (
+                            batch['cat'].to(self.device)
+                            if 'cat' in batch
+                            else None
+                        )
                         y = batch['y'].to(self.device)
 
                         if self.config.task == 'binary':
@@ -273,26 +315,48 @@ class DLTrainer:
                 epoch_val_loss = val_running_loss / len(val_loader.dataset)
                 history['val_loss'].append(epoch_val_loss)
 
-            # Вывод логов
-            val_str = f" | Val Loss: {epoch_val_loss:.4f}" if epoch_val_loss is not None else ""
-            lr_str = f" | LR: {optimizer.param_groups[0]['lr']:.6f}"
-            print(f"Epoch {epoch:02d}/{self.config.epochs:02d} | Train Loss: {epoch_train_loss:.4f}{val_str}{lr_str}")
+                # --- Логика Early Stopping ---
+                if self.config.early_stopping:
+                    if epoch_val_loss < best_val_loss:
+                        best_val_loss = epoch_val_loss
+                        best_model_weights = deepcopy(self.model.state_dict())
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= self.config.patience:
+                            # Восстанавливаем лучшие веса
+                            if best_model_weights is not None:
+                                self.model.load_state_dict(best_model_weights)
+                            break
+
+        # Если Early Stopping не сработал раньше, загружаем лучшую модель под конец
+        if (
+            self.config.early_stopping
+            and val_loader is not None
+            and best_model_weights is not None
+        ):
+            self.model.load_state_dict(best_model_weights)
 
         return history
 
-    def predict(self, X_num: np.ndarray, X_cat: Optional[np.ndarray] = None) -> np.ndarray:
-        """Инференс модели."""
+    def predict(
+        self, X_num: np.ndarray, X_cat: Optional[np.ndarray] = None
+    ) -> np.ndarray:
         self.model.eval()
         dataset = TabularDataset(X_num, X_cat)
-        loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=False)
-        
+        loader = DataLoader(
+            dataset, batch_size=self.config.batch_size, shuffle=False
+        )
+
         preds_list = []
         with torch.no_grad():
             for batch in loader:
                 x_num = batch['num'].to(self.device)
-                x_cat = batch['cat'].to(self.device) if 'cat' in batch else None
+                x_cat = (
+                    batch['cat'].to(self.device) if 'cat' in batch else None
+                )
                 out = self.model(x_num, x_cat)
-                
+
                 if self.config.task == 'binary':
                     probs = torch.sigmoid(out)
                     preds_list.append(probs.cpu().numpy())
@@ -301,5 +365,48 @@ class DLTrainer:
                     preds_list.append(probs.cpu().numpy())
                 else:
                     preds_list.append(out.cpu().numpy())
-                    
+
         return np.vstack(preds_list)
+
+
+class PyTorchMLPWrapper:
+    """ Обертка для DLTrainer, поддерживающая передачу валидационной выборки."""
+
+    def __init__(self, config):
+        self.config = config
+        self.trainer = None
+
+    def fit(self, X_train, y_train, X_val=None, y_val=None):
+        X_tr = X_train.values if hasattr(X_train, 'values') else X_train
+        y_tr = y_train.values if hasattr(y_train, 'values') else y_train
+
+        X_v = (
+            (X_val.values if hasattr(X_val, 'values') else X_val)
+            if X_val is not None
+            else None
+        )
+        y_v = (
+            (y_val.values if hasattr(y_val, 'values') else y_val)
+            if y_val is not None
+            else None
+        )
+
+        self.trainer = DLTrainer(self.config)
+        self.trainer.fit(
+            X_train_num=X_tr, y_train=y_tr, X_val_num=X_v, y_val=y_v
+        )
+        return self
+
+    def predict_proba(self, X):
+        X_arr = X.values if hasattr(X, 'values') else X
+        probs = self.trainer.predict(X_arr).reshape(-1, 1)
+        return np.hstack([1 - probs, probs])
+
+    def predict(self, X):
+        probs = self.predict_proba(X)[:, 1]
+        return (probs > 0.5).astype(int)
+
+    def score(self, X, y):
+        preds = self.predict(X)
+        y_arr = y.values if hasattr(y, 'values') else y
+        return accuracy_score(y_arr, preds)

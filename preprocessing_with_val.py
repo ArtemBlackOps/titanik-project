@@ -18,6 +18,80 @@ from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 
+def evaluate_pipeline_with_cv(
+    train_df, processing_func, pipeline_name='Pipeline'
+):
+    models_dict = {
+        'Logistic Regression': LogisticRegression(
+            random_state=42, max_iter=1000
+        ),
+        'Logistic Regression (L2)': LogisticRegression(
+            penalty='l2', solver='saga', random_state=42, max_iter=2000
+        ),
+        'Logistic Regression (L1)': LogisticRegression(
+            penalty='l1', solver='saga', random_state=42, max_iter=2000
+        ),
+        'Logistic Regression (ElasticNet)': LogisticRegression(
+            penalty='elasticnet',
+            solver='saga',
+            l1_ratio=0.5,
+            random_state=42,
+            max_iter=2000,
+        ),
+        'Support Vector Machines': SVC(random_state=42, probability=True),
+        'KNN': KNeighborsClassifier(n_neighbors=3),
+        'Naive Bayes': GaussianNB(),
+        'Perceptron': Perceptron(random_state=42),
+        'Linear SVC': LinearSVC(random_state=42, max_iter=2000),
+        'Stochastic Gradient Decent': SGDClassifier(random_state=42),
+        'Random Forest': RandomForestClassifier(
+            random_state=42, n_estimators=100
+        ),
+        # --- Градиентный бустинг ---
+        'CatBoost': CatBoostClassifier(verbose=0, random_state=42),
+        'XGBoost': XGBClassifier(
+            random_state=42, eval_metric='logloss', use_label_encoder=False
+        ),
+        'LightGBM': LGBMClassifier(random_state=42, verbose=-1),
+    }
+
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    results = []
+
+    for name, model in models_dict.items():
+        cv_scores = []
+
+        # Разбиваем train_df на 5 фолдов
+        for train_idx, val_idx in skf.split(train_df, train_df['Survived']):
+            fold_train = train_df.iloc[train_idx]
+            fold_val = train_df.iloc[val_idx]
+
+            # Изолированная обработка данных ВНУТРИ фолда!
+            X_tr, Y_tr, X_val = processing_func(fold_train, fold_val)
+
+            model.fit(X_tr, Y_tr)
+
+            # Оценка качества на валидационном фолде
+            val_score = round(model.score(X_val, fold_val['Survived']) * 100, 2)
+            cv_scores.append(val_score)
+
+        # Среднее значение точности по 5 фолдам
+        results.append(
+            {
+                'Model': name,
+                f'{pipeline_name}_CV_Acc': round(np.mean(cv_scores), 2),
+            }
+        )
+
+    return (
+        pd.DataFrame(results)
+        .sort_values(by=f'{pipeline_name}_CV_Acc', ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+
+
 def process_v1(train_df, test_df):
     features = ['Pclass', 'Sex', 'Age', 'SibSp', 'Parch', 'Embarked']
     X_tr, X_te = train_df[features].copy(), test_df[features].copy()
@@ -203,60 +277,3 @@ def process_v4(train_df, test_df):
 
 
 
-def evaluate_pipeline_with_cv(
-    train_df, processing_func, pipeline_name='Pipeline'
-):
-    models_dict = {
-        'Logistic Regression': LogisticRegression(
-            random_state=42, max_iter=1000
-        ),
-        'Support Vector Machines': SVC(random_state=42, probability=True),
-        'KNN': KNeighborsClassifier(n_neighbors=3),
-        'Naive Bayes': GaussianNB(),
-        'Perceptron': Perceptron(random_state=42),
-        'Linear SVC': LinearSVC(random_state=42, max_iter=2000),
-        'Stochastic Gradient Decent': SGDClassifier(random_state=42),
-        'Random Forest': RandomForestClassifier(
-            random_state=42, n_estimators=100
-        ),
-        # --- Градиентный бустинг ---
-        'CatBoost': CatBoostClassifier(verbose=0, random_state=42),
-        'XGBoost': XGBClassifier(
-            random_state=42, eval_metric='logloss', use_label_encoder=False
-        ),
-        'LightGBM': LGBMClassifier(random_state=42, verbose=-1),
-    }
-
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    results = []
-
-    for name, model in models_dict.items():
-        cv_scores = []
-
-        # Разбиваем train_df на 5 фолдов
-        for train_idx, val_idx in skf.split(train_df, train_df['Survived']):
-            fold_train = train_df.iloc[train_idx]
-            fold_val = train_df.iloc[val_idx]
-
-            # Изолированная обработка данных ВНУТРИ фолда!
-            X_tr, Y_tr, X_val = processing_func(fold_train, fold_val)
-
-            model.fit(X_tr, Y_tr)
-
-            # Оценка качества на валидационном фолде
-            val_score = round(model.score(X_val, fold_val['Survived']) * 100, 2)
-            cv_scores.append(val_score)
-
-        # Среднее значение точности по 5 фолдам
-        results.append(
-            {
-                'Model': name,
-                f'{pipeline_name}_CV_Acc': round(np.mean(cv_scores), 2),
-            }
-        )
-
-    return (
-        pd.DataFrame(results)
-        .sort_values(by=f'{pipeline_name}_CV_Acc', ascending=False)
-        .reset_index(drop=True)
-    )
